@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from torchtext.legacy.data import Field, BucketIterator, TabularDataset
+from torchtext.data import Field, BucketIterator, TabularDataset
 from torch.utils.data import Dataset, DataLoader
 import sys
 import os

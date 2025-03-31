@@ -7,7 +7,14 @@ import math
 import numpy as np
 import pandas as pd
 # from utils import *
-from torch._six import string_classes
+
+# from torch._six import string_classes
+try:
+    from torch._six import string_classes
+except ImportError:
+    # Fallback for newer versions of PyTorch where torch._six is removed.
+    string_classes = (str, bytes)
+
 import collections
 from torch.utils.data import Dataset, DataLoader
 from collections import defaultdict
