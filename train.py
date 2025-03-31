@@ -110,6 +110,10 @@ def main(params):
         load_checkpoint(torch.load(model_path_load), model, optimizer)
     
     
+    # valid only in this case
+    L = 53
+    ####################### 
+
     criterion = nn.CrossEntropyLoss(ignore_index=pds_train.padIndex)
     criterion_raw = nn.CrossEntropyLoss(reduction='none')
     criterionMatching = nn.CrossEntropyLoss()
@@ -118,6 +122,7 @@ def main(params):
         print(f"[Epoch {epoch} / {num_epochs}]")
         model.train()
         lossesCE = []
+
         for batch_idx, batch in enumerate(train_iterator):
             if modelconfig["use_entropic"]==False:
                 optimizer.zero_grad()
@@ -126,7 +131,7 @@ def main(params):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1) 
                 optimizer.step()
-                
+
             else:
                 optimizer.zero_grad()
                 lossCE, lossEntropy = ReyniMatchingLossNew(batch, 
@@ -142,51 +147,63 @@ def main(params):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1) 
                 optimizer.step()
-            
+
         mean_lossCETrain = sum(lossesCE) / len(lossesCE)
 
-        model.eval()
-        lossesCE_eval = []
-        lossesMatching_eval = []
-        accuracyVal = 0
-        
-
-        with  torch.no_grad():
-            for batch_idx, batch in enumerate(val_iterator):
-                inp_data, target= batch[0], batch[1]
-                inp_data = inp_data.to(device)
-                output = model(inp_data, target[:-1, :])
-                accuracyVal += accuracy(batch, output, onehot=False).item()
-                output = output.reshape(-1, output.shape[2]) #keep last dimension
-                if onehot:
-                    _, targets_Original = target.max(dim=2)
-                else:
-                    targets_Original= target
-                targets_Original = targets_Original[1:].reshape(-1)
-                loss_eval = criterion(output, targets_Original)
-                lossesCE_eval.append(loss_eval.item()) 
-            mean_lossVal = sum(lossesCE_eval) / len(lossesCE_eval)
-            accuracyVal = accuracyVal/nval
-        out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) +  ", Val loss CE: "+ str(mean_lossVal)+ ", errorVal: "+str(accuracyVal)
-        
-        
-        if epoch%200==0:
+        if epoch%10==0:
             model.eval()
-            criterionE = nn.CrossEntropyLoss(ignore_index=pds_train.padIndex, reduction='none')
-            scoreHungarianVal = HungarianMatchingBS(pds_val, model, 100)
-            scoHVal = scipy.optimize.linear_sum_assignment(scoreHungarianVal)
-            scoreMatchingVal = sum(scoHVal[0]==scoHVal[1])
-            scoreMatchingValClose = sum((scoHVal[0]==scoHVal[1])[maskValclose])
-            scoreMatchingValFar = sum((scoHVal[0]==scoHVal[1])[maskValfar])
-            out+= ", scoreMatching Val :" +str(scoreMatchingVal)+", scoreMatchingValClose: " +str(scoreMatchingValClose)+", scoreMatchingVal Far: "+ str(scoreMatchingValFar)
-            if save_model:
-                checkpoint = {
-                    "state_dict": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                }
-                save_checkpoint(checkpoint, filename=model_path_save)
+            accuracyTrain = 0
+            with  torch.no_grad():
+                for batch_idx, batch in enumerate(train_iterator):
+                    inp_data_train, target_train = batch[0], batch[1]
+                    inp_data_train = inp_data_train.to(device)
+                    output_train = model(inp_data_train, target_train[:-1, :])
+                    accuracyTrain += accuracy(batch, output_train, onehot=False).item()
+                accuracyTrain = (L - accuracyTrain/ntrain) / L
+
+            lossesCE_eval = []
+            lossesMatching_eval = []
+            accuracyVal = 0
+
+            with  torch.no_grad():
+                for batch_idx, batch in enumerate(val_iterator):
+                    inp_data, target= batch[0], batch[1]
+                    inp_data = inp_data.to(device)
+                    output = model(inp_data, target[:-1, :])
+                    accuracyVal += accuracy(batch, output, onehot=False).item()
+                    output = output.reshape(-1, output.shape[2]) #keep last dimension
+                    if onehot:
+                        _, targets_Original = target.max(dim=2)
+                    else:
+                        targets_Original= target
+                    targets_Original = targets_Original[1:].reshape(-1)
+                    loss_eval = criterion(output, targets_Original)
+                    lossesCE_eval.append(loss_eval.item()) 
+                mean_lossVal = sum(lossesCE_eval) / len(lossesCE_eval)
+                accuracyVal = (L - accuracyVal/nval) / L
+            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) +  ", Val loss CE: "+ str(mean_lossVal)+ ", accTrain: "+str(accuracyTrain) + ", accVal: "+str(accuracyVal)
+        else:
+            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain)
+        
+        # if epoch%200==0:
+        #     model.eval()
+        #     criterionE = nn.CrossEntropyLoss(ignore_index=pds_train.padIndex, reduction='none')
+        #     scoreHungarianVal = HungarianMatchingBS(pds_val, model, 100)
+        #     scoHVal = scipy.optimize.linear_sum_assignment(scoreHungarianVal)
+        #     scoreMatchingVal = sum(scoHVal[0]==scoHVal[1])
+        #     scoreMatchingValClose = sum((scoHVal[0]==scoHVal[1])[maskValclose])
+        #     scoreMatchingValFar = sum((scoHVal[0]==scoHVal[1])[maskValfar])
+        #     out+= ", scoreMatching Val :" +str(scoreMatchingVal)+", scoreMatchingValClose: " +str(scoreMatchingValClose)+", scoreMatchingVal Far: "+ str(scoreMatchingValFar)
+        #     if save_model:
+        #         checkpoint = {
+        #             "state_dict": model.state_dict(),
+        #             "optimizer": optimizer.state_dict(),
+        #         }
+        #         save_checkpoint(checkpoint, filename=model_path_save)
+
         out+="\n"
         f.write(out)
+        f.flush()
     print("End Training")
     f.close()
     
