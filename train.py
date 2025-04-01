@@ -25,12 +25,12 @@ def get_params(params):
 
     # Parameters
     parser.add_argument('--trainset', type=str, help="Path to the dataset for training")
-    parser.add_argument('--valset', type=str, help="Path to the dataset for validation")
-    parser.add_argument('--save', type=str, default="", help="path to save model, if empty will not save")
-    parser.add_argument('--load', type=str, default="", help="path to load model, if empty will not save")
+    parser.add_argument('--valset',   type=str, help="Path to the dataset for validation")
+    parser.add_argument('--save',     type=str, default="", help="path to save model, if empty will not save")
+    parser.add_argument('--load',     type=str, default="", help="path to load model, if empty will not save")
     parser.add_argument('--modelconfig', type=str, default="shallow.config.json", help="hyperparameter")
-    parser.add_argument('--outputfile', type=str, default="output.txt", help="file to print scores")
-    
+    parser.add_argument('--outputfile',  type=str, default="output.txt",          help="file to print scores")
+    parser.add_argument('--run_name',    type=str, default=None,                  help="run name for wandb")
     args = parser.parse_args(params)
 
     return args
@@ -83,7 +83,13 @@ def main(params):
     src_position_embedding = PositionalEncoding(modelconfig["embedding_size"], max_len=len_input,device=device)
     trg_position_embedding = PositionalEncoding(modelconfig["embedding_size"], max_len=len_output, device=device)
             
-           
+
+    # wandb
+    if opts.run_name is not None:
+        wandb.init(project="PDDT-path-generation", config=modelconfig)
+        wandbconfig = wandb.config  # Per accedere alle configurazioni
+        wandb.run.name = opts.run_name
+
     model = Transformer(
         modelconfig["embedding_size"],
         modelconfig["src_vocab_size"],
@@ -149,8 +155,9 @@ def main(params):
                 optimizer.step()
 
         mean_lossCETrain = sum(lossesCE) / len(lossesCE)
+        
 
-        if epoch%10==0:
+        if epoch%2==0:
             model.eval()
             accuracyTrain = 0
             with  torch.no_grad():
@@ -182,9 +189,15 @@ def main(params):
                 mean_lossVal = sum(lossesCE_eval) / len(lossesCE_eval)
                 accuracyVal = (L - accuracyVal/nval) / L
             out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) +  ", Val loss CE: "+ str(mean_lossVal)+ ", accTrain: "+str(accuracyTrain) + ", accVal: "+str(accuracyVal)
+            if opts.run_name is not None:
+                wandb.log({"epoch": epoch + 1, "Training-Loss": mean_lossCETrain})
+                wandb.log({"epoch": epoch + 1, "Validation-Loss": mean_lossVal})
+                wandb.log({"epoch": epoch + 1, "Training-Accuracy": accuracyTrain})
+                wandb.log({"epoch": epoch + 1, "Validation-Accuracy": accuracyVal})
         else:
             out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain)
-        
+            if opts.run_name is not None:
+                wandb.log({"epoch": epoch + 1, "Training-Loss": mean_lossCETrain})
         # if epoch%200==0:
         #     model.eval()
         #     criterionE = nn.CrossEntropyLoss(ignore_index=pds_train.padIndex, reduction='none')
