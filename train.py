@@ -41,10 +41,12 @@ def main(params):
         
     # Params
     opts = get_params(params)
-    f = open(opts.outputfile, "w")
+    
     if opts.save:
         save_model=True
         model_path_save = opts.save
+        if not os.path.exists(model_path_save):
+            os.makedirs(model_path_save)
     else:
         save_model = False
     if opts.load:
@@ -53,6 +55,8 @@ def main(params):
     else:
         load_model = False
         
+    f = open(model_path_save + "/" + opts.outputfile, "w")
+
     with open(opts.modelconfig, "r") as read_file:
         print("loading hyperparameter")
         modelconfig = json.load(read_file)
@@ -198,6 +202,14 @@ def main(params):
             out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain)
             if opts.run_name is not None:
                 wandb.log({"epoch": epoch + 1, "Training-Loss": mean_lossCETrain})
+
+        if save_model and epoch%20==0:
+            checkpoint = {
+                "state_dict": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+            }
+            save_checkpoint(checkpoint, filename=model_path_save + "/checkpoint_epoch_"+str(epoch)+".pth.tar")
+
         # if epoch%200==0:
         #     model.eval()
         #     criterionE = nn.CrossEntropyLoss(ignore_index=pds_train.padIndex, reduction='none')
