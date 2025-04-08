@@ -131,7 +131,7 @@ def ReyniMatchingLossNew(batch,
 def LLLoss(batch,
            model,
            criterion, onehot):
-        inp_data, target= batch[0], batch[1]
+        inp_data, target = batch[0], batch[1]
         output = model(inp_data, target[:-1, :])
         output = output.reshape(-1, output.shape[2])#keep last dimension
         if onehot:

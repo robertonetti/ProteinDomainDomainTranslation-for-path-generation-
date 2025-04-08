@@ -510,8 +510,209 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
     
     
-    
 
+class DualSequencePositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=25, device='cpu'):
+        """
+        max_len indica la lunghezza massima per ciascuna delle due sequenze.
+        """
+        super(DualSequencePositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.device = device
+        
+        # Calcolo del positional encoding per una singola sequenza
+        pe = torch.zeros(max_len, d_model).to(device)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)[:, :pe[:, 0::2].shape[1]]
+        pe[:, 1::2] = torch.cos(position * div_term)[:, :pe[:, 1::2].shape[1]]
+        # Aggiungiamo una dimensione batch (in questo caso fissa a 1) e trasponiamo
+        pe = pe.unsqueeze(0).transpose(0, 1)  # Risultato: [max_len, 1, d_model]
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        """
+        x: tensor di forma [lunghezza_totale, batch, d_model]
+        dove lunghezza_totale = 2 * L, con L lunghezza di ciascuna sequenza.
+        """
+        if x.size(0) % 2 != 0:
+            raise ValueError("La lunghezza della sequenza deve essere pari, in quanto sono due sequenze di uguale lunghezza.")
+
+        L = x.size(0) // 2  # lunghezza di ciascuna sequenza
+        # Seleziona il positional encoding per una singola sequenza
+        pe_single = self.pe[:L, :]  # forma: [L, 1, d_model]
+        # Ripeti lo stesso encoding per entrambe le sequenze
+        pe_repeated = pe_single.repeat(2, 1, 1)  # forma: [2*L, 1, d_model]
+        # Applica il positional encoding
+        x = (x + pe_repeated.to(self.device))
+        return self.dropout(x)
+
+class MutationAwarePositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=25, device='cpu'):
+        """
+        max_len: lunghezza massima per ciascuna sequenza (prima e seconda)
+        d_model: dimensione del modello
+        """
+        super(MutationAwarePositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.device = device
+
+        # Calcolo del positional encoding standard per una singola sequenza
+        pe = torch.zeros(max_len, d_model, device=device)
+        position = torch.arange(0, max_len, dtype=torch.float, device=device).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2, device=device).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)[:, :pe[:, 0::2].shape[1]]
+        pe[:, 1::2] = torch.cos(position * div_term)[:, :pe[:, 1::2].shape[1]]
+        pe = pe.unsqueeze(0).transpose(0, 1)  # Risultato: [max_len, 1, d_model]
+        self.register_buffer('pe', pe)
+
+        # Creazione di un embedding "mutazione" appreso per segnalare la seconda sequenza
+        self.mutation_embedding = nn.Parameter(torch.zeros(max_len, 1, d_model))
+        nn.init.xavier_uniform_(self.mutation_embedding)
+
+    def forward(self, x):
+        """
+        x: tensor di forma [2 * L, batch, d_model]
+           dove le prime L righe corrispondono alla sequenza originale,
+           le successive L righe alla sequenza mutata.
+        """
+        if x.size(0) % 2 != 0:
+            raise ValueError("La lunghezza della sequenza deve essere pari, essendo composta da due sequenze di uguale lunghezza.")
+
+        L = x.size(0) // 2
+        # Positional encoding standard per entrambe le sequenze
+        pe_single = self.pe[:L, :]  # [L, 1, d_model]
+
+        # Prima sequenza: somma del positional encoding standard
+        x_first = x[:L, :] + pe_single.to(self.device)
+
+        # Seconda sequenza: somma del positional encoding standard + mutation embedding
+        x_second = x[L:, :] + pe_single.to(self.device) + self.mutation_embedding[:L, :]
+
+        # Riunisco le due sequenze
+        x_out = torch.cat([x_first, x_second], dim=0)
+        return self.dropout(x_out)
+
+class InternalMutationAwareEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=25, device='cpu', threshold=1e-6, flag="src", apply_mask=False):
+        """
+        d_model: dimensione del modello
+        dropout: dropout rate
+        max_len: lunghezza massima per ciascuna sequenza
+        device: dispositivo su cui eseguire i calcoli
+        threshold: soglia per determinare se un elemento è mutato
+        flag: modalità "src" o "trg". Se "src", esegue la codifica mutation-aware; se "trg", esegue solo un positional encoding standard.
+        """
+        super(InternalMutationAwareEncoding, self).__init__()
+        self.flag = flag
+        self.dropout = nn.Dropout(p=dropout)
+        self.device = device
+        self.threshold = threshold
+        self.apply_mask = apply_mask
+
+        # Calcolo del positional encoding standard per una singola sequenza
+        pe = torch.zeros(max_len, d_model, device=device)
+        position = torch.arange(0, max_len, dtype=torch.float, device=device).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2, device=device).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)[:, :pe[:, 0::2].shape[1]]
+        pe[:, 1::2] = torch.cos(position * div_term)[:, :pe[:, 1::2].shape[1]]
+        pe = pe.unsqueeze(0).transpose(0, 1)  # Forma: [max_len, 1, d_model]
+        self.register_buffer('pe', pe)
+
+        if self.flag == "src":
+            # Embedding posizionale per le posizioni mutate
+            self.mutation_pos_embedding = nn.Parameter(torch.zeros(max_len, 1, d_model))
+            nn.init.xavier_uniform_(self.mutation_pos_embedding)
+
+            # Encoding fisso per la seconda parte (mutated) per distinguerla dalla prima
+            fixed_encoding = torch.zeros(max_len, 1, d_model, device=device)
+            fixed_encoding.fill_(0.1)  # Valore costante, modificabile secondo necessità
+            self.register_buffer('fixed_encoding', fixed_encoding)
+
+    def create_attention_mask(self, mask, batch_size, L):
+        """
+        Crea in maniera vettorizzata una maschera di attenzione per una sequenza di lunghezza 2*L per il batch specificato.
+
+        mask: tensor di forma [L, batch, 1] che indica se la posizione è mutata (True) o no (False)
+        batch_size: dimensione del batch
+        L: lunghezza della singola sequenza (originale o mutated)
+
+        Convenzione:
+         - 0: posizione accessibile
+         - -inf: posizione bloccata
+
+        Per le coppie non mutate (mask == False), ciascun token vede solo il token corrispondente
+        nell'altra sequenza.
+        """
+        seq_len = 2 * L
+        att_mask = torch.zeros(batch_size, seq_len, seq_len, device=self.device)
+
+        # Converto la maschera in un tensore booleano di forma [batch, L]
+        non_mutated = ~mask.squeeze(-1).transpose(0, 1)  # shape [batch, L]
+        # Trovo gli indici dove la posizione non è mutata
+        if non_mutated.any():
+            b_idx, pos_idx = torch.where(non_mutated)
+            # Per le posizioni originali: blocca tutte le posizioni eccetto quella corrispondente nella sequenza mutated
+            att_mask[b_idx, pos_idx, :] = float('-inf')
+            att_mask[b_idx, pos_idx, pos_idx + L] = 0.0
+            # Per le posizioni mutated: blocca tutte le posizioni eccetto quella corrispondente nella sequenza originale
+            att_mask[b_idx, pos_idx + L, :] = float('-inf')
+            att_mask[b_idx, pos_idx + L, pos_idx] = 0.0
+
+        return att_mask
+
+    def forward(self, x):
+        """
+        x: se flag == "src": tensor di forma [2*L, batch, d_model],
+           dove le prime L righe corrispondono alla sequenza originale e le successive L a quella mutata.
+           
+           se flag == "trg": tensor di forma [L, batch, d_model].
+        """
+        if self.flag == "trg":
+            # Positional encoding standard: aggiunge il PE ad ogni token
+            L = x.size(0)
+            pe_single = self.pe[:L, :].to(self.device)
+            x_out = x + pe_single
+            return self.dropout(x_out)
+        else:
+            # Modalità "src": esegue la logica completa con mutation-aware encoding
+            if x.size(0) % 2 != 0:
+                raise ValueError("La lunghezza della sequenza deve essere pari (due sequenze di uguale lunghezza).")
+            
+            L = x.size(0) // 2
+            original = x[:L, :]
+            mutated = x[L:, :]
+
+            # Calcola la maschera interna: per ogni posizione, se la differenza tra mutated e original
+            # supera la soglia in almeno una dimensione, la maschera è True.
+            # Shape: [L, batch, 1]
+            mask = (torch.abs(mutated - original) > self.threshold).any(dim=-1, keepdim=True).to(self.device)
+
+            # Applica il positional encoding standard ad entrambe le sequenze
+            pe_single = self.pe[:L, :].to(self.device)
+            x_first = original + pe_single
+            x_second = mutated + pe_single
+
+            # Aggiunge l'embedding per le posizioni mutate, solo dove la maschera è True
+            # x_first = x_first + mask * self.mutation_pos_embedding[:L, :]
+            # x_second = x_second + mask * self.mutation_pos_embedding[:L, :]
+
+            # Aggiunge l'encoding fisso solo alla seconda parte (mutated)
+            x_second = x_second + self.fixed_encoding[:L, :]
+
+            # Ricompone le due sequenze
+            x_out = torch.cat([x_first, x_second], dim=0)
+            x_out = self.dropout(x_out)
+
+            batch_size = x.size(1)
+            if self.apply_mask == True:
+                att_mask = self.create_attention_mask(mask, batch_size, L)
+            else: 
+                seq_len = 2 * L
+                att_mask = torch.zeros(batch_size, seq_len, seq_len, device=self.device)
+
+            return x_out, att_mask
+            
 
 class StructuralAlignedEncoder(nn.Module):
     def __init__(self, d_model, fastapath, pdbPath, chain, dropout=0.1, max_len=25,device='cpu' ):
@@ -633,6 +834,7 @@ class Transformer(nn.Module):
 
         return src_mask.to(self.device)
 
+
     def forward(self, src, trg):
 
         src_seq_length = src.shape[0]
@@ -658,7 +860,7 @@ class Transformer(nn.Module):
                     trg = torch.matmul(trg, self.embed_tokens.weight)
                 
             
-        embed_src = self.src_position_embedding.forward(src)
+        embed_src, mut_src_mask = self.src_position_embedding.forward(src)
         embed_trg = self.trg_position_embedding.forward(trg)
 
 
@@ -670,7 +872,8 @@ class Transformer(nn.Module):
         out = self.transformer(
             embed_src,
             embed_trg,
-            src_key_padding_mask=src_padding_mask,
+            src_mask=mut_src_mask,
+            src_key_padding_mask=src_padding_mask.to(mut_src_mask.dtype),
             tgt_mask=trg_mask,
         )
         out = self.fc_out(out)
@@ -707,15 +910,27 @@ class Transformer(nn.Module):
                 best_guess = torch.distributions.Categorical(logits=logits).sample()
                 best_guess = torch.nn.functional.one_hot(best_guess, num_classes=self.trg_vocab_size).reshape(-1,nsample,self.trg_vocab_size)
                 outputs[i,:,:]= best_guess[-1,:,:]
+            outputs[-1,:,:] = eos.unsqueeze(0).repeat(nsample, 1)
+            return outputs
+
+
+        if method=="bestguess":
+            outputs = torch.zeros(max_len, nsample, self.trg_vocab_size).to(self.device)
+            outputs[0,:,:] = sos.unsqueeze(0).repeat(nsample, 1)
+            for i in range(1, max_len):
+                # with torch.no_grad():
+                output = self.forward(inp_repeted, outputs[:i])
+                best_guess = output.argmax(2)[-1, :] #.item()
+                outputs[i,:,:] = torch.nn.functional.one_hot(best_guess, num_classes=self.trg_vocab_size)
 
             outputs[-1,:,:] = eos.unsqueeze(0).repeat(nsample, 1)
-
             return outputs
+
 
         if method=="gumbel":
             outputs = torch.zeros(max_len, nsample, self.trg_vocab_size).to(self.device)
             outputs[0,:,:] = sos.unsqueeze(0).repeat(nsample, 1)
-            for i in range(1,max_len):
+            for i in range(1, max_len):
                 output = self.forward(inp_repeted, outputs[:i])
                 best_guess = torch.nn.functional.gumbel_softmax(output, hard=True, dim=2)
                 outputs[i,:,:]= best_guess[-1,:,:]
@@ -723,17 +938,7 @@ class Transformer(nn.Module):
             outputs[-1,:,:] = eos.unsqueeze(0).repeat(nsample, 1)
             return outputs
             
-        if method=="bestguess":
-            outputs = torch.zeros(max_len, nsample, self.trg_vocab_size).to(self.device)
-            outputs[0,:,:] = sos.unsqueeze(0).repeat(nsample, 1)
-            for i in range(1,max_len):
-                with torch.no_grad():
-                    output = self.forward(inp_repeted, outputs[:i,:,:])
-                best_guess = output.argmax(2)[-1, :].item()
-                outputs[i,:,:]= torch.nn.functional.one_hot(best_guess, num_classes=self.trg_vocab_size)
-
-            outputs[-1,:,:] = eos.unsqueeze(0).repeat(nsample, 1)
-            return outputs
+        
         
     def pseudosample(self, inp, target, nsample=1, method="simple"):
         if self.onehot:
@@ -757,6 +962,7 @@ class Transformer(nn.Module):
             if self.onehot:
                 outputs = torch.zeros(target.shape[0], nsample, target.shape[2]).to(self.device)
                 outputs[0,:,:] = sos.unsqueeze(0).repeat(nsample, 1)
+
                 output = self.forward(inp, target[:-1, :])
                 prob = torch.nn.functional.softmax(output.clone().detach(),dim=2).reshape(-1,inp.shape[2])
                 best_guess = torch.multinomial(prob, nsample, replacement=True)
