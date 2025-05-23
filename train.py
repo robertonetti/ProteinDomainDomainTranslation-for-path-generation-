@@ -37,6 +37,9 @@ def get_params(params):
 
 def main(params):
 
+
+    indices = torch.tensor([ 2,  3,  4,  5,  9, 11, 12, 13, 14, 15, 16, 27, 28, 30, 32, 34, 35, 36, 38, 42, 48, 50])
+    print("indices: ", indices)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     # Params
@@ -161,24 +164,39 @@ def main(params):
         mean_lossCETrain = sum(lossesCE) / len(lossesCE)
         
 
-        if epoch%25==0:
+
+        model.eval()
+        acc_sampleVal_flt_ML = compute_sample_accuracy_filtred(model, val_iterator, nval, len_output, L, indices, device, method="bestguess")
+        acc_naiveVal_flt = compute_naive_sample_accuracy_filtered(val_iterator, nval, L, indices, device)
+
+        if opts.run_name is not None:
+            wandb.log({"epoch": epoch + 1, 
+                        "Validation-Sample-Accuracy-ML-flt": acc_sampleVal_flt_ML,
+                        }) 
+
+        if epoch%25==0: 
             model.eval()
             accuracyTrain = compute_accuracy(model, train_iterator, ntrain, len_output, L, device)
             accuracyVal, mean_lossVal = compute_loss_and_accuracy(model, val_iterator, criterion, device, L, nval, onehot=False)
-            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) +  ", Val loss CE: "+ str(mean_lossVal)+ ", accTrain: "+str(accuracyTrain) + ", accVal: "+str(accuracyVal)
+            acc_naiveVal = compute_naive_sample_accuracy(val_iterator, nval, L, device)
+            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) +  ", Val loss CE: "+ str(mean_lossVal) + ", accNaiveVal_flt: " + str(acc_naiveVal_flt) + ", accSampleValML_flt: " + str(acc_sampleVal_flt_ML) + ", accTrain: "+str(accuracyTrain) + ", accVal: "+str(accuracyVal) 
             if opts.run_name is not None:
                 wandb.log({"epoch": epoch + 1, "Training-Loss": mean_lossCETrain, "Validation-Loss": mean_lossVal, 
                         "Training-Accuracy": accuracyTrain, "Validation-Accuracy": accuracyVal})
             if epoch%25==0 and epoch>0:
                 accuracy_sampleVal_ML = compute_sample_accuracy(model, val_iterator, nval, len_output, L, device, method="bestguess")
                 # accuracy_sampleVal = compute_sample_accuracy(model, val_iterator, nval, len_output, L, device, method="simple")
-                out += ", accSampleValML: " + str(accuracy_sampleVal_ML) #", accSampleVal: " + str(accuracy_sampleVal) + ", accSampleValML: " + str(accuracy_sampleVal_ML)
+                out +=  ", accVal_Naive: " + str(acc_naiveVal) + ", accSampleValML: " + str(accuracy_sampleVal_ML) #", accSampleVal: " + str(accuracy_sampleVal) + ", accSampleValML: " + str(accuracy_sampleVal_ML)
                 if opts.run_name is not None:
                     wandb.log({"epoch": epoch + 1, 
                                 #"Validation-Sample-Accuracy": accuracy_sampleVal, 
-                                "Validation-Sample-Accuracy-ML": accuracy_sampleVal_ML})  
+                                "Validation-Sample-Accuracy-ML": accuracy_sampleVal_ML, 
+                                "Validation-Naive-Accuracy": acc_naiveVal,
+                                "Validation-Naive-Accuracy-flt": acc_naiveVal_flt,
+                                "Validation-Accuracy": accuracyVal,
+                                })  
         else:
-            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain)
+            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) + ", accNaiveVal_flt: " + str(acc_naiveVal_flt) + ", accSampleValML_flt: " + str(acc_sampleVal_flt_ML) 
             if opts.run_name is not None:
                 wandb.log({"epoch": epoch + 1, "Training-Loss": mean_lossCETrain})
 
@@ -213,6 +231,7 @@ def main(params):
     print("End Training")
     f.close()
     
+    
 def compute_sample_accuracy(model, iterator, n_seqs, len_output, L, device, method="bestguess"):
     with torch.no_grad():
         acc = sum(
@@ -220,12 +239,14 @@ def compute_sample_accuracy(model, iterator, n_seqs, len_output, L, device, meth
             for batch in iterator)
     return (L - acc / n_seqs) / L
 
+
 def compute_accuracy(model, iterator, n_seqs, len_output, L, device):
     with torch.no_grad():
         acc = sum(
             accuracy(batch, model(batch[0].to(device), batch[1][:-1, :]), onehot=False).item()
             for batch in iterator)
     return (L - acc / n_seqs) / L
+
 
 def compute_loss_and_accuracy(model, iterator, criterion, device, L, n_seqs, onehot=False):
     with torch.no_grad():
@@ -237,6 +258,73 @@ def compute_loss_and_accuracy(model, iterator, criterion, device, L, n_seqs, one
             t = (target.max(dim=2)[1] if onehot else target)[1:].reshape(-1)
             losses.append(criterion(out.reshape(-1, out.shape[2]), t).item())
     return (L - total_acc / n_seqs) / L, sum(losses) / len(losses)
+
+
+def compute_sample_accuracy_filtred(model, iterator, n_seqs, len_output, L, indices, device, method="bestguess"):
+    n_filtred = len(indices)
+    with torch.no_grad():
+        acc = sum(
+            accuracy_filtred(batch, model.sample(batch[0].to(device), max_len=len_output, method=method)[1:, :, :], indices, onehot=False).item()
+            for batch in iterator)
+    return (n_filtred - acc / n_seqs) / n_filtred
+
+
+def sample_naive(batch, device):
+    tensor_IN = batch[0]  # (N, M)
+    N, M = tensor_IN.shape
+    L = (N - 2) // 2
+    tensorIN_start = tensor_IN[1 : 1 + L, :]   # (L, M)
+    tensorIN_end   = tensor_IN[1 + L : -1, :]  # (L, M)
+    equal_mask  = (tensorIN_start == tensorIN_end)  # maschere (L, M)
+    update_mask = ~equal_mask
+    coin = torch.rand(L, M, device=device) < 0.5    # moneta 50/50 (L, M)
+    # estraggo a caso start o end dove serve
+    new_vals = torch.where(coin, tensorIN_start, tensorIN_end)  # (L, M)
+    # output: solo dove differiscono, altrimenti start
+    output = torch.where(update_mask, new_vals, tensorIN_start) # (L, M)
+    # pad the result
+    pad_token = tensor_IN[0]
+    pad_column = pad_token * torch.ones(1, M, device=device, dtype=output.dtype)
+    output = torch.cat([pad_column, output, pad_column], dim=0)
+    return output.unsqueeze(-1)
+
+
+def compute_naive_sample_accuracy(iterator, n_seqs, L, device):
+    with torch.no_grad():
+        acc = sum(
+            accuracy(batch, sample_naive(batch, device)[1:, :], onehot=False, naive=True).item()
+            for batch in iterator)
+    return (L - acc / n_seqs) / L
+
+
+def compute_naive_sample_accuracy_filtered(iterator, n_seqs, L, indices, device):
+    n_filtred = len(indices)
+    with torch.no_grad():
+        acc = sum(
+            accuracy_filtred(batch, sample_naive(batch, device)[1:, :], indices, onehot=False, naive=True).item()
+            for batch in iterator)
+    return (n_filtred - acc / n_seqs) / n_filtred
+
+def accuracy_filtred(batch, output, indices, onehot=False, naive=False):
+    bs = output.shape[1]
+    ra = range(bs)
+
+    if onehot==False:
+        proteinOUT1 = batch[1][1:-1,:]
+        proteinOUT1 = proteinOUT1[indices, :]
+        proteinOUT1 = proteinOUT1.float().t()
+        
+        if naive==True:
+            proteinOUT2 = output.max(dim=2)[0][:-1,:]
+        else:
+            proteinOUT2 = output.max(dim=2)[1][:-1,:]
+
+        proteinOUT2 = proteinOUT2[indices, :]
+        proteinOUT2 = proteinOUT2.float().t()
+
+    Distance = torch.cdist(proteinOUT1, proteinOUT2, p=0.0)[ra,ra]
+    return torch.sum(Distance)
+
 
 
 if __name__ == "__main__":

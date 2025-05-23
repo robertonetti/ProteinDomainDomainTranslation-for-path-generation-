@@ -12,22 +12,6 @@ import scipy.optimize
 from src.utils import *
 
 
-
-def accuracy(batch, output, onehot=False):
-    bs = output.shape[1]
-    ra = range(bs)
-    if onehot==False:
-        proteinOUT1 = batch[1][1:-1,:]
-        proteinOUT1 = proteinOUT1.float().t()
-        
-        proteinOUT2 = output.max(dim=2)[1][:-1,:]
-        proteinOUT2 = proteinOUT2.float().t()
-
-    Distance = torch.cdist(proteinOUT1, proteinOUT2, p=0.0)[ra,ra]
-    return torch.sum(Distance)
-
-
-
 def ConditionalSquaredEntropyMatchingLoss(batch,
                                   model,
                                   CCL_mean,
