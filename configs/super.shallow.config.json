@@ -1,17 +1,17 @@
 {
     "num_encoder_layers": 1,
     "num_decoder_layers": 1,
-    "batch_size": 4500,
+    "batch_size": 6800,
     "num_heads": 1,
     "forward_expansion": 1024,
     "Unalign": false,
-    "num_epochs": 400,
+    "num_epochs": 2000,
     "wd": 0.0,
     "src_vocab_size": 21,
     "trg_vocab_size": 21,
     "embedding_size": 55,
     "alpha_entropic": 0.0,
     "use_entropic": false,
-    "learning_rate": 5e-05,
-    "dropout": 0.1
+    "learning_rate": 1e-03,
+    "dropout": 0.0
 }
