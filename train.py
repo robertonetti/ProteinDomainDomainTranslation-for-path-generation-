@@ -31,6 +31,8 @@ def get_params(params):
     parser.add_argument('--modelconfig', type=str, default="shallow.config.json", help="hyperparameter")
     parser.add_argument('--outputfile',  type=str, default="output.txt",          help="file to print scores")
     parser.add_argument('--run_name',    type=str, default=None,                  help="run name for wandb")
+    parser.add_argument('--shuffled_valset',   type=str, default=None, help="Path to the dataset for shuffled validation")
+
     args = parser.parse_args(params)
 
     return args
@@ -39,7 +41,7 @@ def main(params):
 
 
     indices = torch.tensor([ 2,  3,  4,  5,  9, 11, 12, 13, 14, 15, 16, 27, 28, 30, 32, 34, 35, 36, 38, 42, 48, 50])
-    print("indices: ", indices)
+    # print("indices: ", indices)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     # Params
@@ -68,6 +70,9 @@ def main(params):
     Unalign=modelconfig["Unalign"]
     pds_train = ProteinTranslationDataset(opts.trainset, device=device, Unalign=modelconfig["Unalign"], returnIndex=True, onehot=onehot)
     pds_val =   ProteinTranslationDataset(opts.valset,   device=device, Unalign=modelconfig["Unalign"], returnIndex=True, onehot=onehot)
+    if opts.shuffled_valset is not None:
+        pds_val_shuffle = ProteinTranslationDataset(opts.shuffled_valset,   device=device, Unalign=modelconfig["Unalign"], returnIndex=True, onehot=onehot)
+
     len_input = pds_train.inputsize
     len_output = pds_train.outputsize
     
@@ -86,9 +91,13 @@ def main(params):
     val_iterator = DataLoader(pds_val, batch_size=modelconfig["batch_size"],
                     shuffle=True, num_workers=0, collate_fn=default_collate)
     
+    if opts.shuffled_valset is not None:
+        val_iterator_shuffled = DataLoader(pds_val_shuffle, batch_size=modelconfig["batch_size"],
+                    shuffle=True, num_workers=0, collate_fn=default_collate)
+
     src_pad_idx = pds_train.padIndex
-    src_position_embedding = InternalMutationAwareEncoding(modelconfig["embedding_size"], max_len=len_input,device=device, flag="src") # MutationAwarePositionalEncoding(modelconfig["embedding_size"], max_len=len_input,device=device)
-    trg_position_embedding = InternalMutationAwareEncoding(modelconfig["embedding_size"], max_len=len_output, device=device, flag="trg") # MutationAwarePositionalEncoding(modelconfig["embedding_size"], max_len=len_output, device=device)
+    src_position_embedding = MutationAwarePositionalEncoding(modelconfig["embedding_size"], max_len=len_input,device=device) # InternalMutationAwareEncoding(modelconfig["embedding_size"], max_len=len_input, device=device,flag="src") # 
+    trg_position_embedding = PositionalEncoding(modelconfig["embedding_size"], max_len=len_output, device=device) #InternalMutationAwareEncoding(modelconfig["embedding_size"], max_len=len_output, device=device,flag="trg") # 
             
 
     # wandb
@@ -118,6 +127,12 @@ def main(params):
             nn.init.xavier_normal_(p)
  
     optimizer = optim.AdamW(model.parameters(), lr=modelconfig["learning_rate"], weight_decay=modelconfig["wd"])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=modelconfig["num_epochs"],       # numero di epoche su cui applicare l’annealing
+                eta_min=0.0,            # lr minimo (default 0), eventuale valore diverso se vuoi un lr base > 0
+                last_epoch=-1           # indicare -1 per iniziare da lr iniziale
+            )
 
     if load_model:
         load_checkpoint(torch.load(model_path_load), model, optimizer)
@@ -162,47 +177,70 @@ def main(params):
                 optimizer.step()
 
         mean_lossCETrain = sum(lossesCE) / len(lossesCE)
+
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
         
 
 
-        model.eval()
-        acc_sampleVal_flt_ML = compute_sample_accuracy_filtred(model, val_iterator, nval, len_output, L, indices, device, method="bestguess")
-        acc_naiveVal_flt = compute_naive_sample_accuracy_filtered(val_iterator, nval, L, indices, device)
-
-        if opts.run_name is not None:
-            wandb.log({"epoch": epoch + 1, 
-                        "Validation-Sample-Accuracy-ML-flt": acc_sampleVal_flt_ML,
-                        }) 
-
-        if epoch%25==0: 
+        if epoch%10==0: 
             model.eval()
-            accuracyTrain = compute_accuracy(model, train_iterator, ntrain, len_output, L, device)
+            # accuracyTrain = compute_accuracy(model, train_iterator, ntrain, len_output, L, device)
             accuracyVal, mean_lossVal = compute_loss_and_accuracy(model, val_iterator, criterion, device, L, nval, onehot=False)
+
             acc_naiveVal = compute_naive_sample_accuracy(val_iterator, nval, L, device)
-            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) +  ", Val loss CE: "+ str(mean_lossVal) + ", accNaiveVal_flt: " + str(acc_naiveVal_flt) + ", accSampleValML_flt: " + str(acc_sampleVal_flt_ML) + ", accTrain: "+str(accuracyTrain) + ", accVal: "+str(accuracyVal) 
+            acc_sampleVal_flt_ML = compute_sample_accuracy_filtred(model, val_iterator, nval, len_output, L, indices, device, method="bestguess")
+            acc_naiveVal_flt = compute_naive_sample_accuracy_filtered(val_iterator, nval, L, indices, device)
+
+            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) +  ", Val loss CE: "+ str(mean_lossVal) + ", accNaiveVal_flt: " + str(acc_naiveVal_flt) + ", accSampleValML_flt: " + str(acc_sampleVal_flt_ML) #+ ", accTrain: "+str(accuracyTrain) + ", accVal: "+str(accuracyVal) 
             if opts.run_name is not None:
                 wandb.log({"epoch": epoch + 1, "Training-Loss": mean_lossCETrain, "Validation-Loss": mean_lossVal, 
-                        "Training-Accuracy": accuracyTrain, "Validation-Accuracy": accuracyVal})
-            if epoch%25==0 and epoch>0:
-                accuracy_sampleVal_ML = compute_sample_accuracy(model, val_iterator, nval, len_output, L, device, method="bestguess")
-                # accuracy_sampleVal = compute_sample_accuracy(model, val_iterator, nval, len_output, L, device, method="simple")
-                out +=  ", accVal_Naive: " + str(acc_naiveVal) + ", accSampleValML: " + str(accuracy_sampleVal_ML) #", accSampleVal: " + str(accuracy_sampleVal) + ", accSampleValML: " + str(accuracy_sampleVal_ML)
-                if opts.run_name is not None:
-                    wandb.log({"epoch": epoch + 1, 
-                                #"Validation-Sample-Accuracy": accuracy_sampleVal, 
-                                "Validation-Sample-Accuracy-ML": accuracy_sampleVal_ML, 
-                                "Validation-Naive-Accuracy": acc_naiveVal,
-                                "Validation-Naive-Accuracy-flt": acc_naiveVal_flt,
-                                "Validation-Accuracy": accuracyVal,
-                                })  
+                        #"Training-Accuracy": accuracyTrain, "Validation-Accuracy": accuracyVal
+                        "Validation-Naive-Accuracy": acc_naiveVal, 
+                        "Validation-Naive-Accuracy-flt": acc_naiveVal_flt,
+                        "Validation-Sample-Accuracy-flt": acc_sampleVal_flt_ML,
+                        })
+
+            if epoch%10==0 and epoch>0:
+
+                if opts.shuffled_valset is not None:
+                    accuracy_sampleVal_ML = compute_sample_accuracy(model, val_iterator, nval, len_output, L, device, method="bestguess")
+                    accuracy_sampleVal_ML_shuffled = compute_sample_accuracy(model, val_iterator_shuffled, nval, len_output, L, device, method="bestguess")
+                    # accuracy_sampleVal = compute_sample_accuracy(model, val_iterator, nval, len_output, L, device, method="simple")
+                    out +=  ", accVal_Naive: " + str(acc_naiveVal) + ", accSampleValML: " + str(accuracy_sampleVal_ML) + ", accSampleValMLShuffled: " + str(accuracy_sampleVal_ML_shuffled)#", accSampleVal: " + str(accuracy_sampleVal) + ", accSampleValML: " + str(accuracy_sampleVal_ML)
+                    if opts.run_name is not None:
+                        wandb.log({"epoch": epoch + 1, 
+                                    #"Validation-Sample-Accuracy": accuracy_sampleVal, 
+                                    "Validation-Sample-Accuracy-ML": accuracy_sampleVal_ML, 
+                                    "Validation-Sample-Accuracy-ML-Shuffled": accuracy_sampleVal_ML_shuffled
+                                    # "Validation-Naive-Accuracy": acc_naiveVal,
+                                    # "Validation-Naive-Accuracy-flt": acc_naiveVal_flt,
+                                    # "Validation-Accuracy": accuracyVal,
+                                    })  
+                else:
+                    accuracy_sampleVal_ML = compute_sample_accuracy(model, val_iterator, nval, len_output, L, device, method="bestguess")
+                    # accuracy_sampleVal = compute_sample_accuracy(model, val_iterator, nval, len_output, L, device, method="simple")
+                    out +=  ", accVal_Naive: " + str(acc_naiveVal) + ", accSampleValML: " + str(accuracy_sampleVal_ML) #", accSampleVal: " + str(accuracy_sampleVal) + ", accSampleValML: " + str(accuracy_sampleVal_ML)
+                    if opts.run_name is not None:
+                        wandb.log({"epoch": epoch + 1, 
+                                    #"Validation-Sample-Accuracy": accuracy_sampleVal, 
+                                    "Validation-Sample-Accuracy-ML": accuracy_sampleVal_ML, 
+                                    # "Validation-Naive-Accuracy": acc_naiveVal,
+                                    # "Validation-Naive-Accuracy-flt": acc_naiveVal_flt,
+                                    # "Validation-Accuracy": accuracyVal,
+                                    })  
+                        
+            f.write(f"  → Learning rate dopo epoch {epoch}: {current_lr:.6f}")
+            f.flush()
+
         else:
-            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) + ", accNaiveVal_flt: " + str(acc_naiveVal_flt) + ", accSampleValML_flt: " + str(acc_sampleVal_flt_ML) 
+            out = "epoch: "+str(epoch)+", Train loss CE: " + str(mean_lossCETrain) 
             if opts.run_name is not None:
                 wandb.log({"epoch": epoch + 1, "Training-Loss": mean_lossCETrain})
 
         
 
-        if save_model and epoch%100==0:
+        if save_model and epoch%20==0:
             checkpoint = {
                 "state_dict": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
